@@ -10,7 +10,7 @@ FLUX.2 Klein uses a Qwen3 8B text encoder that outputs conditioning tensors of s
 - **Positions 77-511**: Padding/inactive tokens (std ~2.3)
 - **Image edit mode**: Adds `reference_latents` to metadata
 
-This node modifies only the active text region (0-77) to affect prompt adherence and edit behavior. The padding region is left untouched.
+This node modifies only the active text region to affect prompt adherence and edit behavior. The padding region is left untouched. Active region end is auto-detected from attention mask.
 
 ## Installation
 
@@ -43,119 +43,183 @@ General-purpose conditioning enhancement for both text-to-image and image editin
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `text_enhance` | 0.0 | -1.0 to 2.0 | Scales magnitude of active tokens. Positive values increase prompt influence, negative values decrease it. |
-| `detail_sharpen` | 0.0 | -1.0 to 2.0 | Amplifies differences between tokens. Positive sharpens, negative smooths. |
-| `coherence_experimental` | 0.0 | 0.0 to 1.0 | Self-attention pass across tokens. Experimental - start with low values (0.1-0.2). |
+| `magnitude` | 1.0 | 0.0 to 3.0 | Direct scaling of active region embeddings. Values above 1.0 increase prompt influence, below 1.0 decrease it. |
+| `contrast` | 0.0 | -1.0 to 2.0 | Amplifies differences between tokens. Positive values sharpen concept separation, negative values blend them. |
+| `normalize_strength` | 0.0 | 0.0 to 1.0 | Equalizes token magnitudes. Higher values balance emphasis across all tokens in the prompt. |
 | `edit_text_weight` | 1.0 | 0.0 to 3.0 | Image edit mode only. Values below 1.0 preserve more of the original image, above 1.0 follows the prompt more strongly. |
-| `edit_blend_mode` | none | none/boost_text/preserve_image/balanced | Image edit mode only. Preset configurations for common edit scenarios. |
-| `active_token_end` | 77 | 1 to 512 | End position of active text region. Default based on diagnostic findings. |
-| `seed` | 0 | 0 to 2147483647 | Random seed for reproducibility. 0 disables seeding. |
+| `active_end_override` | 0 | 0 to 512 | Manual override for active region end. 0 = auto-detect from attention mask. |
+| `low_vram` | False | True/False | Use float16 computation on CUDA devices. |
+| `device` | auto | auto/cpu/cuda:N | Compute device selection. |
 | `debug` | False | True/False | Prints tensor statistics and modification details to console. |
 
-### FLUX.2 Klein Edit Controller
+### FLUX.2 Klein Detail Controller
 
-Fine-grained control specifically for image editing workflows.
+Regional control over prompt conditioning. Divides active tokens into front/mid/end sections.
 
 #### Parameters
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `prompt_strength` | 1.0 | 0.0 to 3.0 | Global multiplier for text conditioning influence. |
-| `preserve_structure` | 0.0 | 0.0 to 1.0 | Applies smoothing to conditioning for more conservative edits. |
-| `token_emphasis_start` | 0 | 0 to 76 | Start position of token range to emphasize. |
-| `token_emphasis_end` | 77 | 1 to 77 | End position of token range to emphasize. |
-| `emphasis_strength` | 1.0 | 0.0 to 3.0 | Multiplier for the emphasized token range. |
+| `front_mult` | 1.0 | 0.0 to 3.0 | Multiplier for first 25% of active tokens (typically subject/main concept). |
+| `mid_mult` | 1.0 | 0.0 to 3.0 | Multiplier for middle 50% of active tokens (typically details/modifiers). |
+| `end_mult` | 1.0 | 0.0 to 3.0 | Multiplier for last 25% of active tokens (typically style/quality terms). |
+| `emphasis_start` | 0 | 0 to 200 | Start position of custom emphasis region. |
+| `emphasis_end` | 0 | 0 to 200 | End position of custom emphasis region. 0 = disabled. |
+| `emphasis_mult` | 1.0 | 0.0 to 3.0 | Multiplier for the custom emphasis region. |
+| `low_vram` | False | True/False | Use float16 computation on CUDA devices. |
+| `device` | auto | auto/cpu/cuda:N | Compute device selection. |
 | `debug` | False | True/False | Prints debug information to console. |
 
 ## How It Works
 
-### Text Enhancement
+### Magnitude
 
-The `text_enhance` parameter scales the magnitude of embedding vectors in the active region:
+Direct scaling of all embedding vectors in the active region:
 
 ```
-scale = 1.0 + (text_enhance * 0.5)
-region = region * scale
+active = active * magnitude
 ```
 
-A value of 0.5 results in a 1.25x magnitude increase. This affects how strongly the text conditioning influences the diffusion process.
+A value of 1.25 results in 25% stronger conditioning signal to the diffusion model. This directly affects cross-attention key magnitudes.
 
-### Detail Sharpening
+### Contrast
 
 Computes the mean embedding across the sequence, then amplifies deviations from that mean:
 
 ```
-seq_mean = region.mean(dim=1)
-detail = region - seq_mean
-sharpened = seq_mean + detail * (1.0 + sharpen)
+seq_mean = active.mean(dim=1, keepdim=True)
+deviation = active - seq_mean
+active = seq_mean + deviation * (1.0 + contrast)
 ```
 
-This increases the distinctiveness of individual token embeddings.
+This increases the distinctiveness of individual token embeddings, helping separate concepts in complex prompts.
 
-### Coherence (Experimental)
+### Normalize Strength
 
-Projects embeddings to a lower dimension (1024), applies self-attention with temperature scaling, then projects back. This encourages tokens to share information but can cause artifacts at high values.
+Equalizes token magnitudes toward a uniform value:
+
+```
+token_norms = active.norm(dim=-1, keepdim=True)
+mean_norm = token_norms.mean()
+normalized = active / token_norms * mean_norm
+active = active * (1.0 - normalize_strength) + normalized * normalize_strength
+```
+
+This prevents any single token from dominating the conditioning signal.
 
 ### Image Edit Mode Detection
 
-The node automatically detects image edit mode by checking for `reference_latents` in the conditioning metadata. When detected, `edit_text_weight` and `edit_blend_mode` become active.
+The node automatically detects image edit mode by checking for `reference_latents` in the conditioning metadata. When detected, `edit_text_weight` provides additional scaling.
+
+### Active Region Detection
+
+The active region end is auto-detected from the attention mask in metadata:
+
+```
+attn_mask = meta.get("attention_mask", None)
+nonzero = attn_mask[0].nonzero()
+active_end = int(nonzero[-1].item()) + 1
+```
+
+This ensures only meaningful tokens are modified, regardless of prompt length.
+
+## Presets
+
+### Text-to-Image
+
+```
+              BASE   GENTLE   MOD   STRONG   AGG     MAX    CRAZY
+              ----    ----    ----    ----    ----    ----    ----
+magnitude:    1.20    1.15    1.25    1.35    1.50    1.75    2.50
+contrast:     0.00    0.10    0.20    0.30    0.40    0.60    1.20
+normalize:    0.00    0.00    0.00    0.15    0.25    0.35    0.60
+edit_weight:  1.00    1.00    1.00    1.00    1.00    1.00    1.00
+```
+
+### Image Edit
+
+```
+              PRESERVE   SUBTLE   BALANCED   FOLLOW   FORCE
+              --------   ------   --------   ------   -----
+magnitude:       0.85     1.00       1.10     1.20    1.35
+contrast:        0.00     0.05       0.10     0.15    0.25
+normalize:       0.00     0.00       0.10     0.10    0.15
+edit_weight:     0.70     0.85       1.00     1.25    1.50
+```
 
 ## Usage Examples
 
 ### Text-to-Image: Stronger Prompt Adherence
 
 ```
-text_enhance: 0.3
-detail_sharpen: 0.2
-coherence_experimental: 0.0
-edit_text_weight: 1.0
-edit_blend_mode: none
+magnitude: 1.25
+contrast: 0.20
+normalize_strength: 0.00
+edit_text_weight: 1.00
+```
+
+### Text-to-Image: Complex Prompt with Multiple Concepts
+
+```
+magnitude: 1.35
+contrast: 0.30
+normalize_strength: 0.15
+edit_text_weight: 1.00
 ```
 
 ### Image Edit: Follow Prompt More
 
 ```
-text_enhance: 0.2
-detail_sharpen: 0.1
-coherence_experimental: 0.0
-edit_text_weight: 1.5
-edit_blend_mode: none
+magnitude: 1.20
+contrast: 0.15
+normalize_strength: 0.10
+edit_text_weight: 1.25
 ```
 
 ### Image Edit: Preserve Original More
 
 ```
-text_enhance: 0.0
-detail_sharpen: 0.0
-coherence_experimental: 0.0
-edit_text_weight: 0.5
-edit_blend_mode: none
-```
-### Image Edit: My preferred settings:
-
-```
-text_enhance: 1.5
-detail_sharpen: 0.0
-coherence_experimental: 0.0
-edit_text_weight: 2.0
-edit_blend_mode: none
+magnitude: 0.85
+contrast: 0.00
+normalize_strength: 0.00
+edit_text_weight: 0.70
 ```
 
+### Image Edit: Force Prompt Adherence
+
+```
+magnitude: 1.35
+contrast: 0.25
+normalize_strength: 0.15
+edit_text_weight: 1.50
+```
 
 ## Debugging
 
 Enable `debug: True` to see console output:
 
 ```
-=== Flux2KleinEnhancer Item 0 ===
-Input shape: torch.Size([1, 512, 12288])
-Metadata keys: ['pooled_output', 'attention_mask', 'reference_latents']
+==================================================
+Flux2KleinEnhancer Item 0
+==================================================
+Shape: torch.Size([1, 512, 12288])
 Active region: 0 to 71
-Active region std: 42.4100
-Padding region std: 2.3094
-  Enhancement: scale=1.250, mag 893.77 -> 1117.21
-  Image edit mode detected: 1 reference latent(s)
-Output change: mean=5.234821, max=1045.291038
+Edit mode: True
+Active std: 42.4100
+Padding std: 2.3094
+
+Before modifications:
+  Active region mean norm: 893.77
+
+Contrast (+0.20): deviation scaled by 1.20
+
+Magnitude (1.25): all active tokens scaled
+
+Edit text weight (1.15): applied for image edit mode
+
+Final state:
+  Active region mean norm: 893.77 -> 1284.56
+  Output change: mean=42.5341, max=1506.23
 ```
 
 The `Output change` line confirms the conditioning tensor was modified. If it shows `0.000000`, no changes were applied.
@@ -165,27 +229,28 @@ The `Output change` line confirms the conditioning tensor was modified. If it sh
 - **Model**: FLUX.2 Klein 9B
 - **Text Encoder**: Qwen3 8B (4096 hidden dim, 36 layers)
 - **Conditioning Shape**: [batch, 512, 12288]
-- **Active Region**: Positions 0-77 (determined by attention mask)
-- **Embedding Dimension**: 12288 (likely 4096 × 3 concatenated representations)
+- **Joint Attention Dim**: 12288
+- **Active Region**: Dynamic, detected from attention mask (typically 0-77)
+- **Guidance Embeds**: False (step-distilled model, no CFG)
 
 ## Visual Results: Vanilla vs. With Flux2Klein-Enhancer
 
-Exact same workflow, seed and prompt — only difference is using the node or not.  
+Exact same workflow, seed and prompt - only difference is using the node or not.  
 Click images to view full size.
 
-# source photo:
+### Source Photo
 [![Source](examples/source.jpg)](examples/source.jpg)
 
 
 ### Comparison 1
-**Prompt:** [turn only the ground into a mirror surface reflecting the sky, keep the full dog and it's body unchanged and add the dog's reflection below]
+**Prompt:** turn only the ground into a mirror surface reflecting the sky, keep the full dog and its body unchanged and add the dog's reflection below
 
 Vanilla Flux.2 Klein          |  With Enhancer Node
 :-----------------------------:|:-----------------------------:
 [![Vanilla](examples/vanilla_01.png)](examples/vanilla_01.png) | [![With Node](examples/with_node_01.png)](examples/with_node_01.png)
 
 ### Comparison 2
-**Prompt:** [replace the grass with shallow ocean water and add realistic water reflections of the dog, keep the sunny lighting]
+**Prompt:** replace the grass with shallow ocean water and add realistic water reflections of the dog, keep the sunny lighting
 
 Vanilla                       |  With Enhancer Node
 :-----------------------------:|:-----------------------------:
