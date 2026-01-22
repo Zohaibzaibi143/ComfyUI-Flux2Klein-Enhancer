@@ -92,6 +92,25 @@ front(subject)/mid(details)/end(style) [results in these examples only meant to 
 
 **Prompt:** turn only the ground into a mirror surface reflecting the sky, keep the full dog and its body unchanged and add the dog's reflection below
 
+# Added new support node to the FLUX.2 Detail Controller
+
+- Target: A user friendly node to help users comfortably section their prompts to add taget mult to them using the FLUX.2 Detail Controller.
+- The node is sectioned to three parts front/mid/end just like the Detail Controller node + a combiend box "Basically for Vanilla use".
+
+  <a href="examples/new_node.png">
+  <img src="examples/new_node.png" alt="FLUX.2 Detail Controller" width="500">
+</a>
+<a href="examples/eg1.png">
+  <img src="examples/eg1.png" alt="FLUX.2 Detail Controller" width="500">
+</a>
+<a href="examples/eg2.png">
+  <img src="examples/eg2.png" alt="FLUX.2 Detail Controller" width="500">
+</a>
+</a>
+<a href="examples/eg3.png">
+  <img src="examples/eg3.png" alt="FLUX.2 Detail Controller" width="500">
+</a>
+
 ## How It Works
 
 ### Magnitude
