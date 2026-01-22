@@ -16,14 +16,20 @@ from .flux2_klein_enhancer import (
     Flux2KleinDetailController,
 )
 
+from .flux2_sectioned_encoder import (
+    Flux2KleinSectionedEncoder,
+)
+
 NODE_CLASS_MAPPINGS = {
     "Flux2KleinEnhancer": Flux2KleinEnhancer,
     "Flux2KleinDetailController": Flux2KleinDetailController,
+    "Flux2KleinSectionedEncoder": Flux2KleinSectionedEncoder,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Flux2KleinEnhancer": "FLUX.2 Klein Enhancer",
     "Flux2KleinDetailController": "FLUX.2 Klein Detail Controller",
+    "Flux2KleinSectionedEncoder": "FLUX.2 Klein Sectioned Encoder",
 }
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
